@@ -1,0 +1,90 @@
+name: Execute Tests & Generate Log Dashboard
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install pytest
+
+      # Run tests. "|| true" ensures the workflow doesn't stop if a test fails,
+      # allowing us to still generate the report table and look at logs!
+      - name: Run Pytest
+        run: |
+          pytest tests/ --continue-on-collection-errors || true
+
+      # Generate the custom markdown table using python to parse the logs directory
+      - name: Build Markdown Summary Table
+        run: |
+          python -c "
+          import os, re
+          log_dir = 'test-logs'
+          base_url = 'https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/runs/run-${{ github.run_number }}'
+          
+          summary_data = []
+          if os.path.exists(log_dir):
+              for file in sorted(os.listdir(log_dir)):
+                  if file.endswith('.log'):
+                      with open(os.path.join(log_dir, file), 'r') as f:
+                          content = f.read()
+                          
+                      # Extract metadata written by conftest.py
+                      test_name = re.search(r'=== Test Case: (.*) ===', content).group(1)
+                      outcome = re.search(r'Outcome: (.*)', content).group(1)
+                      duration = re.search(r'Duration: (.*)', content).group(1)
+                      
+                      # Map outcomes to clean emojis
+                      emoji = '✅ PASSED' if outcome == 'PASSED' else '❌ FAILED'
+                      if outcome == 'SKIPPED': emoji = '⚠️ SKIPPED'
+                      
+                      # Format the link to target a new tab using standard HTML inside markdown
+                      log_url = f'{base_url}/{file}'
+                      link_html = f'<a href=\"{log_url}\" target=\"_blank\" rel=\"noopener noreferrer\">🔗 View Logs</a>'
+                      
+                      summary_data.append(f'| `{test_name}` | {emoji} | {duration} | {link_html} |')
+          
+          # Write everything to the unique GitHub Step Summary environment file
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('## 📊 Pytest Execution Report\n\n')
+              f.write('| Test Case Name | Status | Duration | Log Link (New Tab) |\n')
+              f.write('| :--- | :---: | :---: | :---: |\n')
+              for row in summary_data:
+                  f.write(row + '\n')
+          "
+
+      # Prepare structure for GitHub Pages archive (preserves historical runs)
+      - name: Stage Artifacts for Web Hosting
+        run: |
+          mkdir -p web-root/runs/run-${{ github.run_number }}
+          cp -r test-logs/* web-root/runs/run-${{ github.run_number }}/
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'web-root'
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
